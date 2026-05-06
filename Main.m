@@ -1,0 +1,342 @@
+clc; clear; close all;
+
+%% ---------------------------
+% 1) Parameters
+%% ---------------------------
+alpha = 1.0;          % update rate
+dt    = 0.1;          % Euler step
+T     = 5;         % fixed horizon
+N     = floor(T / dt);
+
+eps_or = 0.2;        % OR constraint: min(x) <= eps_or
+tol_active = 1e-8;    % boundary activation tolerance
+
+% Potential-field visualization options
+viz_h = 0.03;             % simplex sampling step for background field
+show_contour = true;      % draw potential contours
+show_grad_quiver = true;  % draw projected gradient-flow direction
+quiver_scale = 0.20;      % arrow visualization scale in simplex coordinates
+u_potential_gain = 1.0;   % V(x) += gain * sum_i u_i x_i (use 2.0 if desired)
+
+umax = 1.0;           % ||u||_2 upper bound
+u_const = [0.2, -0.1]*0.5;
+% u_const = [0, 0];
+if norm(u_const, 2) > umax + 1e-12
+    error('u_const violates ||u||_2 <= umax. Reduce u or increase umax.');
+end
+
+% Keep this as a function handle so it can be extended to time-varying u(t)
+u_fn = @(t, x) u_const;
+
+% Initial condition (projected to simplex for safety)
+x0 = [0.70, 0.20, 0.10];
+x0 = proj_or_feasible(x0, eps_or);
+
+%% ---------------------------
+% 2) Simulation (continuous dynamics + Euler)
+%    V(x)=0.5*(x1^2+x2^2+x3^2) + gain*(u1*x1 + u2*x2 + u3*x3), u3=0
+%    gradV = x + gain*[u1,u2,0]
+%    Then project with active-constraint handling
+%% ---------------------------
+Xtraj = zeros(N+1, 3);
+Xtraj(1,:) = x0;
+
+tgrid = (0:N)' * dt;
+
+for k = 1:N
+    x = Xtraj(k,:);
+    t = tgrid(k);
+
+    u = u_fn(t, x);
+    if numel(u) ~= 2
+        error('u_fn must return a 2D vector [u1,u2].');
+    end
+    if norm(u, 2) > umax + 1e-12
+        u = (umax / norm(u, 2)) * u;
+    end
+
+    u_tilde = [u(1), u(2), 0.0];
+    gradV = x + u_potential_gain * u_tilde;
+    v = -alpha * gradV;  % unconstrained velocity
+
+    % First keep motion tangent to simplex, then Euler step
+    v_tan = v - mean(v) * [1, 1, 1];
+    x_temp = x + dt * v_tan;
+    x_temp = proj_simplex(x_temp);
+
+    % OR constraint handling:
+    % If violated (min(x_temp) > eps_or), activate one face x_i = eps_or
+    % chosen by the smallest component index, and move along that active face.
+    if min(x_temp) <= eps_or + tol_active
+        x_next = x_temp;
+    else
+        [~, i_act] = min(x_temp);
+        x_next = step_on_active_face(x, v_tan, dt, i_act, eps_or);
+    end
+
+    % Final safety projection to feasible set
+    x_next = proj_or_feasible(x_next, eps_or);
+    Xtraj(k+1,:) = x_next;
+end
+
+%% ---------------------------
+% 3) Visualization on simplex (trajectory only)
+%% ---------------------------
+figure(1); clf; hold on; axis equal; axis off;
+
+v1 = [0, 0];
+v2 = [1, 0];
+v3 = [0.5, sqrt(3)/2];
+plot([v1(1) v2(1)], [v1(2) v2(2)], 'k-', 'LineWidth', 1.5);
+plot([v2(1) v3(1)], [v2(2) v3(2)], 'k-', 'LineWidth', 1.5);
+plot([v3(1) v1(1)], [v3(2) v1(2)], 'k-', 'LineWidth', 1.5);
+
+text(v1(1)-0.05, v1(2)-0.05, 'x_1', 'FontSize', 16);
+text(v2(1)+0.02, v2(2)-0.05, 'x_2', 'FontSize', 16);
+text(v3(1), v3(2)+0.04, 'x_3', 'FontSize', 16, 'HorizontalAlignment', 'center');
+
+tern2xy = @(x) x(:,1)*v1 + x(:,2)*v2 + x(:,3)*v3;
+P = tern2xy(Xtraj);
+
+% Potential colormap on simplex
+Xbg = simplex_grid(viz_h);
+u0 = u_fn(0, x0);
+if numel(u0) ~= 2
+    error('u_fn must return a 2D vector [u1,u2].');
+end
+if norm(u0, 2) > umax + 1e-12
+    u0 = (umax / norm(u0, 2)) * u0;
+end
+u0_tilde = [u0(1), u0(2), 0.0];
+Vbg = 0.5 * sum(Xbg.^2, 2) + u_potential_gain * (Xbg * u0_tilde.');
+XYbg = tern2xy(Xbg);
+tri = delaunay(XYbg(:,1), XYbg(:,2));
+patch('Faces', tri, 'Vertices', XYbg, ...
+      'FaceVertexCData', Vbg, 'FaceColor', 'interp', ...
+      'EdgeColor', 'none', 'FaceAlpha', 0.58);
+colormap(parula);
+cb = colorbar;
+ylabel(cb, 'Potential V(x)');
+
+if show_contour
+    tr = triangulation(tri, XYbg);
+    [C, hC] = tricontour(tr, Vbg, 10); %#ok<ASGLU>
+    set(hC, 'Color', [0.1, 0.1, 0.1], 'LineWidth', 0.8);
+end
+
+if show_grad_quiver
+    Gbg = -(Xbg + u_potential_gain * ones(size(Xbg,1),1) * u0_tilde);
+    Gbg = Gbg - mean(Gbg, 2) .* ones(size(Gbg));  % tangent to simplex
+    XYbg2 = tern2xy(proj_simplex_rows(Xbg + quiver_scale * Gbg));
+    Dxy = XYbg2 - XYbg;
+    qidx = 1:5:size(Xbg,1); % thin arrows for readability
+    quiver(XYbg(qidx,1), XYbg(qidx,2), Dxy(qidx,1), Dxy(qidx,2), 0, ...
+           'Color', [0.2, 0.2, 0.2], 'LineWidth', 0.7, 'MaxHeadSize', 1.2);
+end
+
+% OR-constraint boundary triangle (x_i = eps_or)
+orv1 = tern2xy([eps_or, eps_or, 1 - 2*eps_or]);
+orv2 = tern2xy([eps_or, 1 - 2*eps_or, eps_or]);
+orv3 = tern2xy([1 - 2*eps_or, eps_or, eps_or]);
+plot([orv1(1) orv2(1)], [orv1(2) orv2(2)], 'k', 'LineWidth', 2.5);
+plot([orv2(1) orv3(1)], [orv2(2) orv3(2)], 'k', 'LineWidth', 2.5);
+plot([orv3(1) orv1(1)], [orv3(2) orv1(2)], 'k', 'LineWidth', 2.5);
+
+plot(P(:,1), P(:,2), 'b-', 'LineWidth', 2.2);
+plot(P(1,1), P(1,2), 'go', 'MarkerFaceColor', 'g', 'MarkerSize', 8);
+plot(P(end,1), P(end,2), 'ro', 'MarkerFaceColor', 'r', 'MarkerSize', 8);
+title('Projected trajectory on simplex');
+set(gcf,'Position',[100 100 900 700]);
+
+%% ---------------------------
+% 4) Figure 2: Dynamic simulation (frame-by-frame)
+%% ---------------------------
+playback_speed = 1.0;            % 1.0 = real dt speed, 2.0 = twice faster
+frame_pause = dt / playback_speed;
+
+figure(2); clf; hold on; axis equal; axis off;
+set(gcf,'Position',[1000 100 900 700]);
+plot([v1(1) v2(1)], [v1(2) v2(2)], 'k-', 'LineWidth', 1.5);
+plot([v2(1) v3(1)], [v2(2) v3(2)], 'k-', 'LineWidth', 1.5);
+plot([v3(1) v1(1)], [v3(2) v1(2)], 'k-', 'LineWidth', 1.5);
+
+text(v1(1)-0.05, v1(2)-0.05, 'x_1', 'FontSize', 16);
+text(v2(1)+0.02, v2(2)-0.05, 'x_2', 'FontSize', 16);
+text(v3(1), v3(2)+0.04, 'x_3', 'FontSize', 16, 'HorizontalAlignment', 'center');
+
+plot([orv1(1) orv2(1)], [orv1(2) orv2(2)], 'k', 'LineWidth', 2.5);
+plot([orv2(1) orv3(1)], [orv2(2) orv3(2)], 'k', 'LineWidth', 2.5);
+plot([orv3(1) orv1(1)], [orv3(2) orv1(2)], 'k', 'LineWidth', 2.5);
+
+hTrail = plot(P(1,1), P(1,2), 'b-', 'LineWidth', 2.0);
+hDot   = plot(P(1,1), P(1,2), 'ro', 'MarkerFaceColor', 'r', 'MarkerSize', 8);
+hStart = plot(P(1,1), P(1,2), 'go', 'MarkerFaceColor', 'g', 'MarkerSize', 8);
+hTime  = text(0.02, 0.95, sprintf('t = %.2f', tgrid(1)), ...
+    'Units', 'normalized', 'FontSize', 13, 'FontWeight', 'bold');
+title('Dynamic trajectory playback (dt-by-dt)');
+
+for k = 2:size(P,1)
+    set(hTrail, 'XData', P(1:k,1), 'YData', P(1:k,2));
+    set(hDot, 'XData', P(k,1), 'YData', P(k,2));
+    set(hTime, 'String', sprintf('t = %.2f', tgrid(k)));
+    drawnow;
+    pause(frame_pause);
+end
+
+%% ===== Helper functions =====
+
+function xproj = proj_simplex(y)
+% Euclidean projection onto simplex {x >= 0, sum(x)=1}
+y = y(:);
+n = numel(y);
+u = sort(y, 'descend');
+cssv = cumsum(u);
+rho = find(u + (1 - cssv) ./ (1:n)' > 0, 1, 'last');
+theta = (cssv(rho) - 1) / rho;
+xproj = max(y - theta, 0);
+xproj = xproj(:).';
+end
+
+function x_next = step_on_active_face(x, v_tan, dt, i_act, eps_or)
+% Move with velocity projected to:
+%   simplex tangent (already satisfied by v_tan) and active face x_i=eps_or.
+e_i = zeros(1,3);
+e_i(i_act) = 1;
+v_face = v_tan - dot(v_tan, e_i) * e_i; % remove normal component to face
+
+% Euler step on the active face
+x_face = x + dt * v_face;
+x_face(i_act) = eps_or;
+
+% Project remaining two coordinates to line segment:
+% z >= 0, z1+z2 = 1 - eps_or
+idx = setdiff(1:3, i_act);
+z = x_face(idx);
+s = 1 - eps_or;
+z = project_to_shifted_simplex_2d(z, s);
+x_face(idx) = z;
+
+x_next = x_face;
+end
+
+function zproj = project_to_shifted_simplex_2d(z, s)
+% Project 2D vector z onto {z >= 0, sum(z)=s}
+z = z(:).';
+zproj = z - ((sum(z) - s) / 2) * [1, 1];
+zproj = max(zproj, 0);
+sz = sum(zproj);
+if sz <= 0
+    zproj = [s/2, s/2];
+else
+    zproj = (s / sz) * zproj;
+end
+end
+
+function xproj = proj_or_feasible(x, eps_or)
+% Project to simplex first; if OR violated, project to nearest active face.
+x = proj_simplex(x);
+if min(x) <= eps_or + 1e-12
+    xproj = x;
+    return;
+end
+
+best = [];
+best_d = inf;
+for i = 1:3
+    cand = x;
+    cand(i) = eps_or;
+    idx = setdiff(1:3, i);
+    cand(idx) = project_to_shifted_simplex_2d(cand(idx), 1 - eps_or);
+    d = norm(cand - x, 2);
+    if d < best_d
+        best_d = d;
+        best = cand;
+    end
+end
+xproj = best;
+end
+
+function X = simplex_grid(h)
+% Generate sampling points on 3-simplex with step h
+vals = 0:h:1;
+X = [];
+for i = 1:numel(vals)
+    x1 = vals(i);
+    for j = 1:numel(vals)
+        x2 = vals(j);
+        x3 = 1 - x1 - x2;
+        if x3 < -1e-12
+            continue;
+        end
+        if x3 < 0
+            x3 = 0;
+        end
+        X(end+1,:) = [x1, x2, x3]; %#ok<AGROW>
+    end
+end
+X = unique(round(X, 10), 'rows');
+end
+
+function Xproj = proj_simplex_rows(X)
+% Row-wise simplex projection for a matrix of row states
+Xproj = zeros(size(X));
+for r = 1:size(X,1)
+    Xproj(r,:) = proj_simplex(X(r,:));
+end
+end
+
+function [C, h] = tricontour(tr, val, nlevels)
+% Lightweight contour from triangulated scalar field
+levels = linspace(min(val), max(val), nlevels);
+h = gobjects(0,1);
+C = cell(numel(levels),1);
+for i = 1:numel(levels)
+    L = levels(i);
+    [segsX, segsY] = iso_segments_on_tri(tr, val, L);
+    C{i} = [segsX, segsY];
+    if ~isempty(segsX)
+        hp = plot(segsX.', segsY.', '-');
+        h = [h; hp(:)]; %#ok<AGROW>
+    end
+end
+end
+
+function [segsX, segsY] = iso_segments_on_tri(tr, val, level)
+T = tr.ConnectivityList;
+P = tr.Points;
+segsX = [];
+segsY = [];
+for k = 1:size(T,1)
+    ids = T(k,:);
+    pk = P(ids,:);
+    vk = val(ids);
+    [xs, ys] = tri_level_segment(pk, vk, level);
+    if ~isempty(xs)
+        segsX(end+1,:) = xs; %#ok<AGROW>
+        segsY(end+1,:) = ys; %#ok<AGROW>
+    end
+end
+end
+
+function [xs, ys] = tri_level_segment(p, v, level)
+xs = [];
+ys = [];
+edges = [1 2; 2 3; 3 1];
+pts = [];
+for e = 1:3
+    i = edges(e,1);
+    j = edges(e,2);
+    vi = v(i); vj = v(j);
+    if (level-vi)*(level-vj) > 0 || abs(vi-vj) < 1e-14
+        continue;
+    end
+    t = (level - vi) / (vj - vi);
+    if t >= 0 && t <= 1
+        pts(end+1,:) = p(i,:) + t*(p(j,:) - p(i,:)); %#ok<AGROW>
+    end
+end
+if size(pts,1) >= 2
+    xs = [pts(1,1), pts(2,1)];
+    ys = [pts(1,2), pts(2,2)];
+end
+end

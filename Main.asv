@@ -5,7 +5,7 @@ clc; clear; close all;
 %% ---------------------------
 alpha = 1.0;          % update rate
 dt    = 0.1;          % Euler step
-T     = 6;         % fixed horizon
+T     = 5;         % fixed horizon
 N     = floor(T / dt);
 
 eps_or = 0.2;        % OR constraint: min(x) <= eps_or
@@ -26,19 +26,18 @@ x0 = proj_or_feasible(x0, eps_or);
 umax = 1.0;           % ||u||_2 upper bound
 % u_before = [0.2, -0.1] * 0.5;   % u for t < t_switch
 % u_after  = [-0.1, 0.2] * 0.5;   % u for t >= t_switch
-u_phase1 = [-0.5,  0.0];    % u for t < t_switch1
-u_phase2 = [-0.5, -0.2];    % u for t_switch1 <= t < t_switch2
-u_phase3 = [ 0.0, 0.0];    % u for t >= t_switch2
-t_switch1 = T / 3;
-t_switch2 = 2 * T / 3;
+u_before = [0.0, 0.6];   % u for t < t_switch
+u_after  = [-0.5, 0.2];   % u for t >= t_switch
+t_switch = T / 2;                % switch time
 
-for u_chk = {u_phase1, u_phase2, u_phase3}
-    if norm(u_chk{1}, 2) > umax + 1e-12
-        error('u violates ||u||_2 <= umax.');
-    end
+if norm(u_before, 2) > umax + 1e-12
+    error('u_before violates ||u||_2 <= umax.');
+end
+if norm(u_after, 2) > umax + 1e-12
+    error('u_after violates ||u||_2 <= umax.');
 end
 
-u_fn = @(t, x) select_u(t, u_phase1, u_phase2, u_phase3, t_switch1, t_switch2);
+u_fn = @(t, x) select_u(t, u_before, u_after, t_switch);
 
 %% ---------------------------
 % 2) Simulation (continuous dynamics + Euler)
@@ -111,11 +110,9 @@ text(v3(1), v3(2)+0.04, 'x_3', 'FontSize', 16, 'HorizontalAlignment', 'center');
 
 tern2xy = @(x) x(:,1)*v1 + x(:,2)*v2 + x(:,3)*v3;
 P = tern2xy(Xtraj);
-k_sw1 = find(tgrid >= t_switch1, 1);
-k_sw2 = find(tgrid >= t_switch2, 1);
-u_phase2_tilde = [u_phase2(1), u_phase2(2), 0.0];
-u_phase3_tilde = [u_phase3(1), u_phase3(2), 0.0];
-Vbg_phase2 = [];  Vbg_phase3 = [];  % computed after Xbg/tri are ready (below)
+k_sw = find(tgrid >= t_switch, 1);   % index of switch point in tgrid
+u_after_tilde = [u_after(1), u_after(2), 0.0];
+Vbg_after = [];   % computed after Xbg/tri are ready (below)
 
 % Potential colormap on simplex
 Xbg = simplex_grid(viz_h);
@@ -127,9 +124,8 @@ if norm(u0, 2) > umax + 1e-12
     u0 = (umax / norm(u0, 2)) * u0;
 end
 u0_tilde = [u0(1), u0(2), 0.0];
-Vbg        = 0.5 * sum(Xbg.^2, 2) + u_potential_gain * (Xbg * u0_tilde.');
-Vbg_phase2 = 0.5 * sum(Xbg.^2, 2) + u_potential_gain * (Xbg * u_phase2_tilde.');
-Vbg_phase3 = 0.5 * sum(Xbg.^2, 2) + u_potential_gain * (Xbg * u_phase3_tilde.');
+Vbg = 0.5 * sum(Xbg.^2, 2) + u_potential_gain * (Xbg * u0_tilde.');
+Vbg_after = 0.5 * sum(Xbg.^2, 2) + u_potential_gain * (Xbg * u_after_tilde.');
 XYbg = tern2xy(Xbg);
 tri = delaunay(XYbg(:,1), XYbg(:,2));
 patch('Faces', tri, 'Vertices', XYbg, ...
@@ -163,9 +159,8 @@ plot([orv1(1) orv2(1)], [orv1(2) orv2(2)], 'k', 'LineWidth', 2.5);
 plot([orv2(1) orv3(1)], [orv2(2) orv3(2)], 'k', 'LineWidth', 2.5);
 plot([orv3(1) orv1(1)], [orv3(2) orv1(2)], 'k', 'LineWidth', 2.5);
 
-plot(P(1:k_sw1,      1), P(1:k_sw1,      2), 'b-', 'LineWidth', 2.2);   % phase 1
-plot(P(k_sw1:k_sw2,  1), P(k_sw1:k_sw2,  2), 'r-', 'LineWidth', 2.2);   % phase 2
-plot(P(k_sw2:end,    1), P(k_sw2:end,    2), 'm-', 'LineWidth', 2.2);   % phase 3
+plot(P(1:k_sw,   1), P(1:k_sw,   2), 'b-', 'LineWidth', 2.2);   % u_before
+plot(P(k_sw:end, 1), P(k_sw:end, 2), 'r-', 'LineWidth', 2.2);   % u_after
 plot(P(1,1), P(1,2), 'go', 'MarkerFaceColor', 'g', 'MarkerSize', 8);
 plot(P(end,1), P(end,2), 'ko', 'MarkerFaceColor', 'k', 'MarkerSize', 8);
 title('Projected trajectory on simplex');
@@ -221,19 +216,17 @@ title('Dynamic trajectory playback (dt-by-dt)');
 axis manual;   % freeze axis limits so new quiver/contour objects don't auto-expand
 
 for k = 2:size(P,1)
-    if k == k_sw1 || k == k_sw2
-        Vbg_new    = Vbg_phase2 * (k == k_sw1) + Vbg_phase3 * (k == k_sw2);
-        u_tilde_new = u_phase2_tilde * (k == k_sw1) + u_phase3_tilde * (k == k_sw2);
-        set(hBgPatch, 'FaceVertexCData', Vbg_new);
+    if k == k_sw
+        set(hBgPatch, 'FaceVertexCData', Vbg_after);
         delete(hBgOverlay); hBgOverlay = gobjects(0,1);
         if show_contour
             tr_d = triangulation(tri, XYbg);
-            [~, hCd] = tricontour(tr_d, Vbg_new, 10);
+            [~, hCd] = tricontour(tr_d, Vbg_after, 10);
             set(hCd, 'Color', [0.1 0.1 0.1], 'LineWidth', 0.8);
             hBgOverlay = [hBgOverlay; hCd(:)];
         end
         if show_grad_quiver
-            Gbgd = -(Xbg + u_potential_gain * ones(size(Xbg,1),1) * u_tilde_new);
+            Gbgd = -(Xbg + u_potential_gain * ones(size(Xbg,1),1) * u_after_tilde);
             Gbgd = Gbgd - mean(Gbgd, 2) .* ones(size(Gbgd));
             XYbg2d = tern2xy(proj_simplex_rows(Xbg + quiver_scale * Gbgd));
             Dxyd = XYbg2d - XYbg;
@@ -383,13 +376,11 @@ for k = 1:size(T,1)
 end
 end
 
-function u = select_u(t, u_phase1, u_phase2, u_phase3, t_switch1, t_switch2)
-if t < t_switch1
-    u = u_phase1;
-elseif t < t_switch2
-    u = u_phase2;
+function u = select_u(t, u_before, u_after, t_switch)
+if t < t_switch
+    u = u_before;
 else
-    u = u_phase3;
+    u = u_after;
 end
 end
 

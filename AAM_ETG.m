@@ -110,137 +110,82 @@ for c = 1:nClusters
 end
 
 %% ===========================================================
-% 4b) Systematic enumeration of ALL constrained equilibria.
-%
-%     For each k-subset S of the nQ modes, solve the (k+1)-constraint
-%     KKT system (simplex equality + k mode equalities simultaneously
-%     active).  Total candidates: sum_{k=1}^{nQ} C(nQ,k) = 2^nQ - 1 = 31.
-%     Filter for z >= 0; all are automatically OR-feasible since
-%     being on a mode boundary satisfies that mode's constraint.
-%
-%     Then classify STABLE vs UNSTABLE by perturbation test:
-%     - STABLE  : every random perturbation returns to z*
-%     - UNSTABLE: at least one perturbation diverges -> saddle
-%
-%     The stable set replaces the sampling-based clusters as the
-%     authoritative node list for the ETG.
+% 4b) Stability of each k=1 (single-mode-boundary) equilibrium, via
+%     DIRECT self-consistency: run forward dynamics from Z_mode(q,:)
+%     itself (no perturbation needed/wanted -- the escape direction
+%     at a genuine saddle is typically a narrow, low-dimensional cone
+%     that random Gaussian perturbations rarely hit in 5D, which is
+%     why a perturbation-based test gave unreliable results). If the
+%     point doesn't even stay at itself under the full union dynamics,
+%     a nearer mode face is dominating it -> not a genuine attractor.
 %% ===========================================================
-nPertClass  = 20;
-eps_class   = 1e-3;
-nClassSteps = 200;
-
-all_eq      = zeros(0, nR);
-all_eq_type = {};
-all_eq_k    = [];
-
-fprintf('\n--- Systematic KKT enumeration of all constrained equilibria ---\n');
-for k = 1:nQ
-    subsets_k = nchoosek(1:nQ, k);
-    for p = 1:size(subsets_k,1)
-        S = subsets_k(p,:);
-        bl = cell(1, k+1);
-        bl{1} = ones(1,nR);
-        for idx = 1:k; bl{idx+1} = A(S(idx),:); end
-        tl = [1, rho(S)];
-        z_cand = solve_active_kkt(tau, w, bl, tl);
-        if any(~isfinite(z_cand)), continue; end   % skip singular systems
-        if any(z_cand < -1e-6), continue; end
-        z_cand = max(z_cand,0); z_cand = z_cand/sum(z_cand);
-        if max(abs(A(S,:)*z_cand(:) - rho(S)')) > 1e-3, continue; end
-        all_eq(end+1,:)    = z_cand; %#ok<AGROW>
-        all_eq_type{end+1} = S;      %#ok<AGROW>
-        all_eq_k(end+1)    = k;      %#ok<AGROW>
+nConvCheck = 300;
+mode_stable = false(nQ,1);
+fprintf('\n--- Self-consistency of mode-restricted equilibria under u=0 ---\n');
+for q = 1:nQ
+    z = Z_mode(q,:);
+    for k = 1:nConvCheck
+        z = sim_step(z, zeros(1,nR), tau, w, alpha, dt, A, rho);
+    end
+    moved = norm(z - Z_mode(q,:));
+    mode_stable(q) = moved < cluster_tol;
+    if mode_stable(q)
+        fprintf('%-26s : STAYS  (genuine stable eq.)\n', mode_names{q});
+    else
+        fprintf('%-26s : DRIFTS (moved %.4f) -- not an independent RoA\n', mode_names{q}, moved);
     end
 end
-nAllEq = size(all_eq,1);
-fprintf('%d feasible candidates found (from %d possible subsets).\n', nAllEq, 2^nQ-1);
 
-% Stability classification via perturbation
-rng(3);
-is_stable_eq = false(nAllEq,1);
-for e = 1:nAllEq
-    z_e = all_eq(e,:);
-    stable = true;
-    for p = 1:nPertClass
-        d = randn(1,nR); d = d - mean(d); d = d/max(norm(d),1e-9);
-        z_p = proj_or_feasible_groups(z_e + eps_class*d, A, rho);
-        for kk = 1:nClassSteps
-            z_p = sim_step(z_p, zeros(1,nR), tau, w, alpha, dt, A, rho);
-        end
-        if norm(z_p - z_e) > cluster_tol*3
-            stable = false; break;
-        end
-    end
-    is_stable_eq(e) = stable;
-    tag = 'STABLE  '; if ~stable; tag = 'UNSTABLE'; end
-    fprintf('  k=%d modes%s : %s  Phi0=%.4f  z=%s\n', all_eq_k(e), ...
-        mat2str(all_eq_type{e}), tag, Phi0(all_eq(e,:),tau,w), mat2str(round(z_e,3)));
-end
-
-% Update clusters with systematic stable equilibria
-stable_idx = find(is_stable_eq);
-clusters   = all_eq(stable_idx,:);
-nClusters  = size(clusters,1);
-clusterMode = zeros(nClusters,1);
-for c = 1:nClusters
-    [~,clusterMode(c)] = min(vecnorm(Z_mode - clusters(c,:),2,2));
-end
-fprintf('\n-> %d STABLE  /  %d UNSTABLE  equilibria\n', nClusters, sum(~is_stable_eq));
+stable_modes = find(mode_stable);
+clusters     = Z_mode(stable_modes,:);
+nClusters    = numel(stable_modes);
+clusterMode  = stable_modes(:);
+fprintf('\n-> %d genuine stable equilibria: modes %s\n', nClusters, mat2str(stable_modes'));
 
 %% ===========================================================
-% 5) Adjacency + edge cost from unstable equilibria (Lemma 2).
+% 5) Adjacency + edge cost (Lemma 2) via the k=2 joint-boundary point.
 %
-%    For each unstable eq. z_u, perturb in both +/- directions and
-%    run forward dynamics to find which STABLE equilibria are on
-%    each side.  Those stable equilibria are ADJACENT.
-%    Edge cost = Phi0(z_u) - Phi0(z*_stable).
+%    For every pair of genuinely stable modes (qi,qj), the candidate
+%    saddle is the closed-form joint-KKT point where BOTH constraints
+%    are simultaneously active (solve_active_kkt). No search/random
+%    perturbation: it is a true saddle of the union dynamics exactly
+%    when its potential exceeds BOTH stable equilibria (a basic
+%    convexity fact -- adding a binding constraint can only raise the
+%    minimum, so if Phi0(z_u) > Phi0(z*_i) and > Phi0(z*_j), z_u sits
+%    above both and is the lowest-energy crossing point between them).
 %% ===========================================================
-nPertAdj = 30;
 isAdjacent    = false(nClusters, nClusters);
 edge_cost_fwd = nan(nClusters, nClusters);
 unstable_eq   = cell(nClusters, nClusters);
 
-fprintf('\n--- Adjacency from unstable equilibria ---\n');
-for ue = 1:numel(find(~is_stable_eq))
-    unstable_list = find(~is_stable_eq);
-    e   = unstable_list(ue);
-    z_u = all_eq(e,:);
-    Phi_u = Phi0(z_u, tau, w);
-    hits = zeros(1, nClusters);
-    for p = 1:nPertAdj
-        d = randn(1,nR); d = d - mean(d); d = d/max(norm(d),1e-9);
-        for sgn = [+1, -1]
-            z_p = proj_or_feasible_groups(z_u + sgn*eps_class*d, A, rho);
-            for kk = 1:nClassSteps
-                z_p = sim_step(z_p, zeros(1,nR), tau, w, alpha, dt, A, rho);
-            end
-            [~,c_hit] = min(vecnorm(clusters - z_p, 2, 2));
-            hits(c_hit) = hits(c_hit) + 1;
+fprintf('\n--- Adjacency via k=2 joint-boundary points ---\n');
+for ii = 1:nClusters
+    for jj = ii+1:nClusters
+        qi = clusterMode(ii); qj = clusterMode(jj);
+        z_u = solve_active_kkt(tau, w, {ones(1,nR), A(qi,:), A(qj,:)}, [1, rho(qi), rho(qj)]);
+        if any(~isfinite(z_u)) || any(z_u < -1e-6)
+            fprintf('%-22s / %-22s : joint boundary infeasible\n', mode_names{qi}, mode_names{qj});
+            continue;
+        end
+        z_u = max(z_u,0); z_u = z_u/sum(z_u);
+        Phi_u = Phi0(z_u, tau, w);
+        Phi_i = Phi0(clusters(ii,:), tau, w);
+        Phi_j = Phi0(clusters(jj,:), tau, w);
+        if Phi_u > Phi_i && Phi_u > Phi_j
+            isAdjacent(ii,jj) = true; isAdjacent(jj,ii) = true;
+            unstable_eq{ii,jj} = z_u; unstable_eq{jj,ii} = z_u;
+            edge_cost_fwd(ii,jj) = Phi_u - Phi_i;
+            edge_cost_fwd(jj,ii) = Phi_u - Phi_j;
+            fprintf('%-22s / %-22s : ADJACENT  z_u=%s  barrier(%d->%d)=%.4f barrier(%d->%d)=%.4f\n', ...
+                mode_names{qi}, mode_names{qj}, mat2str(round(z_u,3)), ...
+                ii,jj,edge_cost_fwd(ii,jj), jj,ii,edge_cost_fwd(jj,ii));
+        else
+            fprintf('%-22s / %-22s : NOT adjacent (joint point Phi0=%.4f does not exceed both, %.4f/%.4f)\n', ...
+                mode_names{qi}, mode_names{qj}, Phi_u, Phi_i, Phi_j);
         end
     end
-    reached = find(hits > 0);
-    for a = 1:numel(reached)
-        for b = a+1:numel(reached)
-            i = reached(a); j = reached(b);
-            if Phi_u > Phi0(clusters(i,:),tau,w) && Phi_u > Phi0(clusters(j,:),tau,w)
-                if isnan(edge_cost_fwd(i,j)) || Phi_u < Phi0(unstable_eq{i,j},tau,w)
-                    isAdjacent(i,j) = true; isAdjacent(j,i) = true;
-                    unstable_eq{i,j} = z_u; unstable_eq{j,i} = z_u;
-                    edge_cost_fwd(i,j) = Phi_u - Phi0(clusters(i,:),tau,w);
-                    edge_cost_fwd(j,i) = Phi_u - Phi0(clusters(j,:),tau,w);
-                end
-            end
-        end
-    end
-    fprintf('  k=%d modes%s : Phi0=%.4f  hits=%s\n', all_eq_k(e), ...
-        mat2str(all_eq_type{e}), Phi_u, mat2str(hits));
 end
 [ri, ci] = find(triu(isAdjacent,1));
-fprintf('\n--- Edge costs ---\n');
-for k = 1:numel(ri)
-    fprintf('C%d<->C%d : barrier(%d->%d)=%.4f  barrier(%d->%d)=%.4f\n', ...
-        ri(k),ci(k), ri(k),ci(k),edge_cost_fwd(ri(k),ci(k)), ci(k),ri(k),edge_cost_fwd(ci(k),ri(k)));
-end
 if isempty(ri), fprintf('(no adjacency found)\n'); end
 
 %% ===========================================================
@@ -293,7 +238,8 @@ push_dir = target_pt - z0_demo;
 push_dir = push_dir / max(norm(push_dir), 1e-9);
 
 fprintf('\n--- Demo scenario ---\n');
-fprintf('Start: cluster %d (q1 eq)   Target: cluster %d\n', startCluster, targetCluster);
+fprintf('Start:  cluster %d = %s\n', startCluster, mode_names{clusterMode(startCluster)});
+fprintf('Target: cluster %d = %s\n', targetCluster, mode_names{clusterMode(targetCluster)});
 fprintf('Potential barrier for this edge: %.4f\n', edge_cost_fwd(startCluster, targetCluster));
 
 t_settle = 1.0;   % phase 1: confirm sitting at start equilibrium

@@ -32,6 +32,9 @@ u_phase3 = [ 0.0, 0.0];    % u for t >= t_switch2
 t_switch1 = T / 3;
 t_switch2 = 2 * T / 3;
 
+% gif_filename = 'trajectory.gif';  % set to '' to skip saving
+gif_filename = '';  % set to '' to skip saving
+
 for u_chk = {u_phase1, u_phase2, u_phase3}
     if norm(u_chk{1}, 2) > umax + 1e-12
         error('u violates ||u||_2 <= umax.');
@@ -176,6 +179,7 @@ set(gcf,'Position',[100 100 900 700]);
 %% ---------------------------
 playback_speed = 1.0;            % 1.0 = real dt speed, 2.0 = twice faster
 frame_pause = dt / playback_speed;
+gif_delay    = frame_pause;       % seconds per frame in the GIF
 
 figure(2); clf; hold on; axis equal; axis off;
 set(gcf,'Position',[1000 100 900 700]);
@@ -220,6 +224,13 @@ hTime  = text(0.02, 0.95, sprintf('t = %.2f', tgrid(1)), ...
 title('Dynamic trajectory playback (dt-by-dt)');
 axis manual;   % freeze axis limits so new quiver/contour objects don't auto-expand
 
+% Write first frame
+if ~isempty(gif_filename)
+    frame = getframe(gcf);
+    [imind, cm] = rgb2ind(frame2im(frame), 256);
+    imwrite(imind, cm, gif_filename, 'gif', 'Loopcount', inf, 'DelayTime', gif_delay);
+end
+
 for k = 2:size(P,1)
     if k == k_sw1 || k == k_sw2
         Vbg_new    = Vbg_phase2 * (k == k_sw1) + Vbg_phase3 * (k == k_sw2);
@@ -245,6 +256,11 @@ for k = 2:size(P,1)
     set(hDot, 'XData', P(k,1), 'YData', P(k,2));
     set(hTime, 'String', sprintf('t = %.2f', tgrid(k)));
     drawnow;
+    if ~isempty(gif_filename)
+        frame = getframe(gcf);
+        [imind, cm] = rgb2ind(frame2im(frame), 256);
+        imwrite(imind, cm, gif_filename, 'gif', 'WriteMode', 'append', 'DelayTime', gif_delay);
+    end
     pause(frame_pause);
 end
 
